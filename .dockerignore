@@ -1,0 +1,11 @@
+.git
+.idea
+.gradle
+**/build
+**/dist
+**/node_modules
+**/.DS_Store
+**/*.iml
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
