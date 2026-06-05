@@ -31,4 +31,5 @@ interface YoutubePlayer {
   playVideo(): void;
   pauseVideo(): void;
   setVolume(volume: number): void;
+  destroy(): void;
 }

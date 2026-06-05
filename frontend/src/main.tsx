@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Clapperboard, Pause, Play, RotateCw, SkipForward, Trophy, Volume2 } from 'lucide-react';
+import { Clapperboard, Home, Lock, LogOut, Mail, Pause, Play, RotateCw, SkipForward, Trophy, Volume2 } from 'lucide-react';
 import './styles.css';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080';
@@ -35,6 +35,16 @@ type SyncResponse = {
   videosSynced: number;
 };
 
+type AuthUser = {
+  id: string;
+  email: string;
+};
+
+type AuthSession = {
+  token: string;
+  user: AuthUser;
+};
+
 type OutcomeModal = {
   kind: 'correct' | 'failed';
   movieTitle: string;
@@ -59,6 +69,22 @@ function loadYouTubeApi() {
 }
 
 function App() {
+  const [authSession, setAuthSession] = useState<AuthSession | null>(() => {
+    const saved = localStorage.getItem('cineguess:auth');
+    if (!saved) return null;
+    try {
+      return JSON.parse(saved) as AuthSession;
+    } catch {
+      localStorage.removeItem('cineguess:auth');
+      return null;
+    }
+  });
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [screen, setScreen] = useState<'home' | 'daily'>('home');
   const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [movieIndex, setMovieIndex] = useState(0);
@@ -67,9 +93,8 @@ function App() {
   const [attemptsUsed, setAttemptsUsed] = useState(0);
   const [outcomeModal, setOutcomeModal] = useState<OutcomeModal | null>(null);
   const [answer, setAnswer] = useState('');
-  const [username, setUsername] = useState(localStorage.getItem('cineguess:username') ?? 'guest');
   const [result, setResult] = useState<AnswerResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(authSession));
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
@@ -112,9 +137,9 @@ function App() {
   }, [playbackElapsed]);
 
   useEffect(() => {
-    fetchChallenge(0);
     fetchLeaderboard();
-  }, []);
+    setLoading(false);
+  }, [authSession?.token]);
 
   useEffect(() => {
     if (!challenge) return;
@@ -164,12 +189,19 @@ function App() {
   }, []);
 
   async function fetchChallenge(slot = movieIndex) {
+    if (!authSession) return;
     setLoading(true);
     setError(null);
     clearAutoAdvanceTimer();
     clearPlaybackTimers();
     try {
-      const response = await fetch(`${API_BASE_URL}/api/challenges/daily/${slot}`);
+      const response = await fetch(`${API_BASE_URL}/api/challenges/daily/${slot}`, {
+        headers: authHeaders()
+      });
+      if (response.status === 401 || response.status === 403) {
+        signOut();
+        return;
+      }
       if (!response.ok) throw new Error(await readError(response));
       const data: Challenge = await response.json();
       setMovieIndex(slot);
@@ -235,6 +267,84 @@ function App() {
     }
   }
 
+  function authHeaders(): HeadersInit {
+    return authSession ? { Authorization: `Bearer ${authSession.token}` } : {};
+  }
+
+  async function submitAuth(event: React.FormEvent) {
+    event.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/${authMode}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: authEmail, password: authPassword })
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const session: AuthSession = await response.json();
+      localStorage.setItem('cineguess:auth', JSON.stringify(session));
+      setAuthSession(session);
+      setScreen('home');
+      setChallenge(null);
+      setAuthPassword('');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Could not sign in');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  function signOut() {
+    clearPlaybackTimers();
+    clearAutoAdvanceTimer();
+    playerRef.current?.pauseVideo();
+    playerRef.current?.destroy();
+    playerRef.current = null;
+    localStorage.removeItem('cineguess:auth');
+    setAuthSession(null);
+    setScreen('home');
+    setChallenge(null);
+    setOutcomeModal(null);
+    setResult(null);
+    setAnswer('');
+    setError(null);
+    setSyncMessage(null);
+    setLoading(false);
+    setMovieIndex(0);
+    setCurrentStage(1);
+    currentStageRef.current = 1;
+    setSkippedStages(new Set());
+    setAttemptsUsed(0);
+    setPlaybackElapsed(0);
+    playbackElapsedRef.current = 0;
+    playbackBaseElapsedRef.current = 0;
+    playbackStartedAtRef.current = null;
+    setVideoRevealed(false);
+    setIsPlaying(false);
+  }
+
+  function openDailyMode() {
+    setScreen('daily');
+    fetchChallenge(0);
+  }
+
+  function returnToHome() {
+    clearPlaybackTimers();
+    clearAutoAdvanceTimer();
+    playerRef.current?.pauseVideo();
+    setScreen('home');
+    setChallenge(null);
+    setOutcomeModal(null);
+    setResult(null);
+    setAnswer('');
+    setError(null);
+    setSyncMessage(null);
+    setLoading(false);
+    setVideoRevealed(false);
+    setIsPlaying(false);
+  }
+
   function playFragment() {
     if (!challenge || !playerRef.current) return;
     clearPlaybackTimers();
@@ -268,16 +378,19 @@ function App() {
 
   async function submitAnswer(event: React.FormEvent) {
     event.preventDefault();
-    if (!challenge || !answer.trim()) return;
-    localStorage.setItem('cineguess:username', username.trim() || 'guest');
+    if (!challenge || !answer.trim() || !authSession) return;
     const response = await fetch(`${API_BASE_URL}/api/challenges/${challenge.challengeId}/answer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Username': username.trim() || 'guest'
+        Authorization: `Bearer ${authSession.token}`
       },
       body: JSON.stringify({ answer, stageSeconds: currentStage })
     });
+    if (response.status === 401 || response.status === 403) {
+      signOut();
+      return;
+    }
     if (!response.ok) {
       setError(await readError(response));
       return;
@@ -395,6 +508,126 @@ function App() {
     return `${minutes}:${String(wholeSeconds).padStart(2, '0')}.${tenths}`;
   }
 
+  if (!authSession) {
+    return (
+      <main className="start-screen">
+        <section className="start-hero">
+          <div className="start-copy">
+            <div className="start-kicker">Daily movie challenge</div>
+            <h1>CINEGUESS</h1>
+            <p>Watch short fragments, spend your attempts carefully, and climb the daily board.</p>
+          </div>
+          <form className="auth-card" onSubmit={submitAuth}>
+            <div className="auth-tabs">
+              <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>
+                Login
+              </button>
+              <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>
+                Register
+              </button>
+            </div>
+            <h2>{authMode === 'login' ? 'Welcome back' : 'Create account'}</h2>
+            <label className="auth-field">
+              <Mail size={18} />
+              <input
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="email"
+                type="email"
+                autoComplete="email"
+                required
+              />
+            </label>
+            <label className="auth-field">
+              <Lock size={18} />
+              <input
+                value={authPassword}
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder="password"
+                type="password"
+                autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                minLength={6}
+                required
+              />
+            </label>
+            {authError && <div className="auth-error">{authError}</div>}
+            <button className="auth-submit" disabled={authLoading}>
+              {authLoading ? 'Please wait' : authMode === 'login' ? 'Login' : 'Register'}
+            </button>
+            <div className="start-board">
+              <div className="leaderboard-title">
+                <Trophy size={17} />
+                <span>Daily Top</span>
+              </div>
+              {leaderboard.length === 0 ? (
+                <div className="empty-row">No attempts</div>
+              ) : (
+                leaderboard.slice(0, 5).map((entry, index) => (
+                  <div className="leaderboard-row" key={entry.username}>
+                    <span>{index + 1}</span>
+                    <strong>{entry.username}</strong>
+                    <b>{entry.score}</b>
+                  </div>
+                ))
+              )}
+            </div>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
+  if (screen === 'home') {
+    return (
+      <main className="mode-screen">
+        <section className="mode-shell">
+          <div className="mode-topbar">
+            <div>
+              <span>Signed in</span>
+              <strong>{authSession.user.email}</strong>
+            </div>
+            <button className="icon-button" onClick={signOut} aria-label="Logout" title="Logout">
+              <LogOut size={18} />
+            </button>
+          </div>
+
+          <div className="mode-hero">
+            <div className="start-kicker">Choose mode</div>
+            <h1>CINEGUESS</h1>
+            <p>Pick a challenge mode and start guessing from short movie fragments.</p>
+          </div>
+
+          <div className="mode-grid">
+            <button className="mode-card active" onClick={openDailyMode}>
+              <Clapperboard size={34} />
+              <span>Daily challenge</span>
+              <strong>5 movies today</strong>
+              <b>Play</b>
+            </button>
+          </div>
+
+          <div className="mode-board">
+            <div className="leaderboard-title">
+              <Trophy size={17} />
+              <span>Daily Top</span>
+            </div>
+            {leaderboard.length === 0 ? (
+              <div className="empty-row">No attempts</div>
+            ) : (
+              leaderboard.slice(0, 5).map((entry, index) => (
+                <div className="leaderboard-row" key={entry.username}>
+                  <span>{index + 1}</span>
+                  <strong>{entry.username}</strong>
+                  <b>{entry.score}</b>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-screen">
       <section className="app-shell">
@@ -423,8 +656,14 @@ function App() {
 
         <aside className="game-panel">
           <div className="game-topbar">
+            <button className="icon-button" onClick={returnToHome} aria-label="Home" title="Home">
+              <Home size={18} />
+            </button>
             <button className="icon-button" onClick={() => fetchChallenge(movieIndex)} aria-label="Reload challenge" title="Reload challenge">
               <RotateCw size={18} />
+            </button>
+            <button className="icon-button" onClick={signOut} aria-label="Logout" title={authSession.user.email}>
+              <LogOut size={18} />
             </button>
             <label className="volume-pill" title="Volume">
               <Volume2 size={16} />
@@ -506,7 +745,6 @@ function App() {
           </div>
 
           <form className="answer-form" onSubmit={submitAnswer}>
-            <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="username" />
             <input value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="movie title" />
             <button className="submit-button" disabled={!challenge || !answer.trim() || Boolean(outcomeModal)}>Submit</button>
           </form>

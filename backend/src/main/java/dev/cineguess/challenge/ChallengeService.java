@@ -78,12 +78,12 @@ public class ChallengeService {
                         .flatMap(response -> cache.putJson(cacheKey, response, Duration.ofMinutes(30)).thenReturn(response))));
     }
 
-    public Mono<AnswerResponse> answer(UUID challengeId, AnswerRequest request, String username) {
+    public Mono<AnswerResponse> answer(UUID challengeId, AnswerRequest request, UUID userId) {
         return dailyChallengeRepository.findById(challengeId)
                 .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Challenge not found")))
                 .flatMap(challenge -> movieRepository.findById(challenge.getMovieId())
                         .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Movie not found")))
-                        .flatMap(movie -> userService.getOrCreate(username)
+                        .flatMap(movie -> userService.findById(userId)
                                 .flatMap(user -> {
                                     boolean correct = isCorrect(request.answer(), movie);
                                     int score = correct ? SCORES.getOrDefault(request.stageSeconds(), 0) : 0;
